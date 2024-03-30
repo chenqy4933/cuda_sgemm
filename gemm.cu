@@ -34,8 +34,17 @@ __global__ void gemm_kernel_NN(
     int tx32 = threadIdx.x % 32;
     int ty32 = threadIdx.x / 32;
 
+    //! every thread block read TILE_Y rows of A
+    //! every 4 thread read a row of A with TILE_K  elements
+    //! every thread read 4 elements
     const float* pA = (A + K * TILE_Y * blockIdx.y + ty4 * K + tx4 * 4);
+    //! every thread block read TILE_X columns of B
+    //! every 32 thread read a row of B with TILE_X elements
+    //! every thread read 4 elements
     const float* pB = (B + TILE_X * blockIdx.x + ty32 * N + tx32 * 4);
+
+    //! every thread block write TILE_Y/4 rows of C, TILE_X_4 * 4(float4)
+    //! columns of C
     float4* pC = C + TILE_Y * blockIdx.y * N / 4 + TILE_X_4 * blockIdx.x;
 
     int sts_a_offset = tx4 * 4 * TILE_Y + ty4;
@@ -169,7 +178,9 @@ __global__ void gemm_kernel_NN(
             c[7][1].z += reg_a[j % 2][1].w * reg_b[j % 2][1].z;
             c[7][1].w += reg_a[j % 2][1].w * reg_b[j % 2][1].w;
         }
-        
+
+        //! the last iter K, write the global data to shared memory which will
+        //! be used in the next iteration
         if(i < K) {
             *((float*)&smem_a[write_stage_idx][0] + sts_a_offset + 0 * TILE_Y + 0) = ldg_a_reg[0].x;
             *((float*)&smem_a[write_stage_idx][0] + sts_a_offset + 1 * TILE_Y + 0) = ldg_a_reg[0].y;
@@ -186,11 +197,14 @@ __global__ void gemm_kernel_NN(
             write_stage_idx ^= 1;
         }
 
+        //! load data from shared memory to register for the next TILE_K
+        //! iteration
         reg_a[0][0] = smem_a[load_stage_idx ^ 1][0 + ty];
         reg_a[0][1] = smem_a[load_stage_idx ^ 1][16 + ty];
         reg_b[0][0] = smem_b[load_stage_idx ^ 1][0 + tx];
         reg_b[0][1] = smem_b[load_stage_idx ^ 1][16 + tx];
 
+        //! compute the last TILE_K-1 iteration, the register data is load ahead
         c[0][0].x += reg_a[1][0].x * reg_b[1][0].x;
         c[0][0].y += reg_a[1][0].x * reg_b[1][0].y;
         c[0][0].z += reg_a[1][0].x * reg_b[1][0].z;
@@ -308,4 +322,15 @@ __global__ void gemm_kernel_NN(
             }
         }
     }
+}
+
+void OptsGemm(int m, int n, int k, float* d_A, float* d_B, float* d_C,
+              float alpha, float beta) {
+    constexpr int BLOCK_DIM = 128;
+    // subm, subn, subk
+    dim3 block(256);
+    dim3 grid((m + BLOCK_DIM - 1) / BLOCK_DIM, (n + BLOCK_DIM - 1) / BLOCK_DIM);
+
+    gemm_kernel_NN<<<grid, block>>>(d_A, d_B, (float4*)d_C, alpha, beta, m, n,
+                                    k);
 }
